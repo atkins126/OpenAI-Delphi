@@ -21,7 +21,7 @@ interface
 
 uses
   System.Diagnostics, System.Classes, System.SysUtils, Data.Bind.Components,
-  Winapi.Windows, Data.Bind.ObjectScope, REST.Client, REST.Types,
+  Data.Bind.ObjectScope, REST.Client, REST.Types,
   FireDAC.Stan.Intf,
   FireDAC.Stan.Option, FireDAC.Stan.Param, FireDAC.Stan.Error,
   REST.Response.Adapter,
@@ -38,12 +38,13 @@ const
   OAI_CLASSIFICATIONS = '/classifications';
   OAI_ANSWER = '/answers';
   OAI_FILES = '/files';
-  TOAIEngineName: TArray<String> = ['text-davinci-001', 'text-curie-001', 'text-babbage-001', 'text-ada-001', 'davinci', 'curie',
-    'babbage', 'ada'];
+  TOAIEngineName: TArray<String> = ['text-davinci-002', 'text-davinci-001', 'text-curie-001', 'text-babbage-001', 'text-ada-001', 'davinci',
+    'curie', 'babbage', 'ada'];
 
 type
-  TOAIEngine = (egTextDavinci001, egTextCurie001, egTextBabbage001, egTextAda001, egDavinci, egCurie, egBabbage, egAda);
+  TOAIEngine = (egTextDavinci002, egTextDavinci001, egTextCurie001, egTextBabbage001, egTextAda001, egDavinci, egCurie, egBabbage, egAda);
   TOAIRequests = (orNone, rAuth, orEngines, orCompletions, orSearch, rClassifications, orAnswers, orFiles);
+  TFilePurpose = (fpAnswer, fpSearch, fpClassification, fpFineTune);
 
 type
   TRESTRequestOAI = class(TRESTRequest)
@@ -70,12 +71,14 @@ type
     FOnError: TNotifyEvent;
     FAPIKey: String;
     FOrganization: String;
+    FFilePurpose: TFilePurpose;
     FRESTRequest: TRESTRequestOAI;
     FRESTClient: TRESTClient;
     FRESTResponse: TRESTResponse;
     FMemtable: TFDMemTable;
     FRESTResponseDataSetAdapter: TRESTResponseDataSetAdapter;
     FCompletions: TCompletions;
+    FStatusCode: Integer;
     procedure readEngines;
     procedure SetEndPoint(const Value: String);
     procedure SetApiKey(const Value: string);
@@ -86,10 +89,12 @@ type
     procedure CreateRESTClient;
     procedure CreateRESTRequest;
     procedure ExecuteCompletions;
+    procedure HttpRequestError(Sender: TCustomRESTRequest);
+    procedure HttpClientError(Sender: TCustomRESTClient);
   public
     constructor Create(var MemTable: TFDMemTable; const APIFileName: String = '');
     destructor Destroy; Override;
-    procedure HttpError(Sender: TCustomRESTClient);
+    // procedure HttpError(Sender: TCustomRESTClient);
     property ErrorMessage: String read FErrorMessage;
   published
     procedure Execute;
@@ -99,6 +104,7 @@ type
     procedure AfterExecute(Sender: TCustomRESTRequest);
     property OnResponse: TNotifyEvent read FOnResponse write FOnResponse;
     property OnError: TNotifyEvent read FOnError write FOnError;
+    property StatusCode: Integer read FStatusCode;
     property Engine: TOAIEngine read FEngine write SetEngine;
     property Endpoint: String read FEndpoint write SetEndPoint;
     property Organization: String read FOrganization write SetOrganization;
@@ -107,11 +113,45 @@ type
     property RequestType: TOAIRequests read FRequestType write FRequestType;
     property Completions: TCompletions write SetCompletions;
     property BodyContent: String read FBodyContent;
+    property FilePurpose: TFilePurpose read FFilePurpose write FFilePurpose;
+
   end;
 
 implementation
 
 { TOpenAI }
+
+function SliceString(const AString: string; const ADelimiter: string): TArray<String>;
+var
+  I: Integer;
+  p: ^Integer;
+  PLine, PStart: PChar;
+  s: String;
+begin
+
+  I := 1;
+  PLine := PChar(AString);
+
+  PStart := PLine;
+  inc(PLine);
+
+  while (I < Length(AString)) do
+  begin
+    while (PLine^ <> #0) and (PLine^ <> ADelimiter) do
+    begin
+      inc(PLine);
+      inc(I);
+    end;
+
+    SetString(s, PStart, PLine - PStart);
+    SetLength(Result, Length(Result) + 1);
+    Result[Length(Result) - 1] := s;
+    inc(PLine);
+    inc(I);
+    PStart := PLine;
+  end;
+
+end;
 
 procedure TOpenAI.CreateRESTRespose;
 begin
@@ -134,7 +174,7 @@ begin
   FRESTClient.UserAgent := 'MagnumLabsOAIClient';
   FRESTClient.Accept := FAcceptType;
   FRESTClient.ContentType := FContentType;
-  FRESTClient.OnHTTPProtocolError := HttpError;
+  FRESTClient.OnHTTPProtocolError := HttpClientError;
 end;
 
 procedure TOpenAI.CreateRESTRequest;
@@ -149,9 +189,12 @@ begin
   FRESTRequest.Client := FRESTClient;
   FRESTRequest.OnAfterExecute := AfterExecute;
   FRESTRequest.FRequestType := TOAIRequests.orNone;
+  FRESTRequest.OnHTTPProtocolError := HttpRequestError;
 end;
 
 constructor TOpenAI.Create(var MemTable: TFDMemTable; const APIFileName: String = '');
+var
+  fileName: String;
 begin
   FErrorMessage := '';
   FOnResponse := nil;
@@ -163,9 +206,14 @@ begin
   //
   CreateRESTRequest();
 
-  if not APIFileName.IsEmpty and FileExists(APIFileName) then
+{$IF Defined(ANDROID)}
+  fileName := TPath.Combine(TPath.GetDocumentsPath, APIFileName);
+{$ELSE}
+  fileName := APIFileName;
+{$ENDIF}
+  if not APIFileName.IsEmpty and FileExists(fileName) then
   begin
-    FAPIKey := TFile.ReadAllText(APIFileName);
+    FAPIKey := TFile.ReadAllText(fileName);
     SetApiKey(FAPIKey);
   end;
 
@@ -180,9 +228,18 @@ begin
   inherited Destroy;
 end;
 
-procedure TOpenAI.HttpError(Sender: TCustomRESTClient);
+procedure TOpenAI.HttpRequestError(Sender: TCustomRESTRequest);
 begin
   FRESTRequest.FRequestType := orNone;
+  FStatusCode := FRESTRequest.Response.StatusCode;
+  FErrorMessage := 'Request error: ' + FRESTRequest.Response.StatusCode.ToString;
+  FOnError(Self);
+end;
+
+procedure TOpenAI.HttpClientError(Sender: TCustomRESTClient);
+begin
+  FRESTRequest.FRequestType := orNone;
+  FErrorMessage := FRESTRequest.Response.ErrorMessage;
   FOnError(Self);
 end;
 
@@ -238,7 +295,18 @@ begin
 end;
 
 procedure TOpenAI.AfterExecute(Sender: TCustomRESTRequest);
+var
+  LStatusCode: Integer;
 begin
+
+  LStatusCode := FRESTResponse.StatusCode;
+
+  if FStatusCode = 0 then
+    FStatusCode := LStatusCode;
+
+  if not (FStatusCode in [200,201]) then
+    Exit;
+
   FBodyContent := FRESTResponse.Content;
 
   case FRequestType of
@@ -278,7 +346,6 @@ begin
       ;
   end;
 
-  //
   FRESTRequest.FRequestType := orNone;
   if Assigned(FOnResponse) then
     FOnResponse(Self);
