@@ -171,6 +171,7 @@ end;
 procedure TCompletions.CreateCompletion(var ABody: String);
 var
    AJSONObject: TJSONObject;
+   JSONArray: TJSONArray;
    Value, Stop: String;
 begin
    AJSONObject := TJSONObject.Create;
@@ -187,8 +188,13 @@ begin
    if not FUser.IsEmpty then
       AJSONObject.AddPair(TJSONPair.Create('user', FUser));
 
-   for Stop in FStop do
-      AJSONObject.AddPair(TJSONPair.Create('stop', Stop));
+   if Length(Stop) > 0 then
+   begin
+      JSONArray := TJSONArray.Create;
+      for Stop in FStop do
+         JSONArray.Add(Stop);
+      AJSONObject.AddPair(TJSONPair.Create('stop', JSONArray));
+   end;
 
    if FNumberOfCompletions <> 1 then
       AJSONObject.AddPair(TJSONPair.Create('n', TJSONNumber.Create(FNumberOfCompletions)));
